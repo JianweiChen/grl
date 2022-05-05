@@ -1,5 +1,9 @@
-import pandas as pd
+import logging
+import time
+
 import networkx as nx
+import pandas as pd
+
 
 def iterdir(obj):
     df = pd.DataFrame(dir(obj), columns=['member'])
@@ -39,3 +43,17 @@ def monkey(_class, method_name=None):
         setattr(_class, _method_name, func)
         return func
     return _decofunc
+
+class GrlReport(object):
+    def __init__(self, prefix):
+        self.prefix = prefix
+        self.tc = None
+    def __call__(self, msg):
+        logging.warning(f"{self.prefix} {msg}")
+    def __enter__(self):
+        self.tc = time.time()
+        self("doing...")
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        cost = time.time() - self.tc
+        msg = f"done, cost {cost} sec"
+        self(msg)
