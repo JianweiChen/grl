@@ -32,6 +32,13 @@ def head(jter, n=10):
     if more:
         print("... for head")
 
+def take(n):
+    def func(xs):
+        if n >= xs.__len__():
+            return None
+        return xs[n]
+    return func
+
 def monkey(_class, method_name=None):
     def _decofunc(func):
         if not method_name:

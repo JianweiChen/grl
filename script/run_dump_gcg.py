@@ -147,8 +147,15 @@ def run():
         df_edge = df_edge.assign(edgetype=df_edge.src_nodetype+df_edge.tgt_nodetype.str.lower())
         df_edge = df_edge[['src', 'tgt', 'edgetype']]
     with GrlReport("edge_part_two_neighbor_kdtree"):
+        id2nodename = df_node.nodename
         df_edge_nn = make_df_edge_with_kdtree(df_node.query("nodetype=='N'"), 'N')
         df_edge_pp = make_df_edge_with_kdtree(df_node.query("nodetype=='P'"), 'P')
+        df_edge_pp = df_edge_pp \
+            .assign_by("src", src_stopname=id2nodename.str.split("_").apply(lambda xs: xs[0])) \
+            .assign_by("tgt", tgt_stopname=id2nodename.str.split("_").apply(lambda xs: xs[0])) \
+            .query("src_stopname==tgt_stopname") \
+            .drop("src_stopname", axis=1) \
+            .drop("tgt_stopname", axis=1)
         df_edge = pd.concat([
             df_edge, df_edge_nn, df_edge_pp,
         ], axis=0)
@@ -156,10 +163,12 @@ def run():
         df_city_nodeid = df_node \
             .nodename \
             .apply(lambda x: x.split("_")[2].split("|")) \
-            .explode("nodename") \
+            .rename("cityname") \
+            .to_frame() \
             .rename_axis("nodeid") \
             .reset_index() \
-            .groupby("nodename") \
+            .explode("cityname") \
+            .groupby("cityname") \
             .agg(
                 nodeids=('nodeid', 'unique'),
             ) \
