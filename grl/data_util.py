@@ -84,7 +84,7 @@ class Gcg(object):
         else:
             self.g = g
         
-        # self.init_from_g(self.g)
+        self.init_from_g(self.g)
     
     def init_from_g(self, g):
         self.g = g
@@ -95,6 +95,8 @@ class Gcg(object):
         gps_array = self.df_gps[['lng', 'lat']].to_numpy()
         self.kdtree = KDTree(gps_array)
         self.set_vertex_attr()
+        self.set_edge_attr()
+        self.nvids = self.g.vs.select(nodetype='N').indices
     
     def get_random_vertex_id(self):
         vid = random.randint(0, self.df_vertex.shape[0])
@@ -121,6 +123,41 @@ class Gcg(object):
         for key in gcg.g.vs[0]['_m'].keys():
             gcg.g.vs[key] = [v['_m'][key] for v in gcg.g.vs]
         del gcg.g.vs['_m']
+    def set_edge_attr(gcg):
+        gcg.g.es['weight'] = gcg.g.es['weight_default']
+
+    def epath_to_feat(gcg, epath):
+
+        edgetypes = gcg.g.es.select(epath)['edgetype']
+        weights = gcg.g.es.select(epath)['weight']
+        mhts = gcg.g.es.select(epath)['mht']
+        df = pd.DataFrame(dict(edgetype=edgetypes, mht=mhts, weight=weights, c=1))
+        df = df.groupby("edgetype").sum()
+        edgetype_list = [
+            'Ll', 'Ln', 'Lp', 'Nl', 'Nn', 'Np', 'Pl', 'Pn', 'Pp'
+        ]
+        df = df.reindex(edgetype_list).fillna(0.0)
+        sum_row = df.sum().tolist()
+        df.loc['Ss'] = sum_row
+        feat = df.to_numpy().T.flatten()
+        return feat
+
+    def generate_action_instance(self, vid, to):
+        to = self.g.vs.select(to).select(nodetype='N').indices
+        v = self.g.vs[vid]
+        start_gps = [v['lng'], v['lat']]
+        start_gps = np.broadcast_to(start_gps, (len(to), 2))
+        tov = self.g.vs.select(to)
+        end_gps = np.stack([tov['lng'], tov['lat']]).T
+        gps = np.concatenate([start_gps, end_gps], axis=1)
+
+        dis = np.stack([np_distance(gps), np_mht(gps)]).T
+        gentype = np.zeros_like(dis)[..., :1]
+
+        paths = self.g.get_shortest_paths(vid, to, weights='weight', output='epath')
+        feat = np.stack([self.epath_to_feat(_) for _ in paths], axis=0)
+        feat = np.concatenate([gps, dis, feat, gentype], axis=1)
+        return feat
 class GcgDataLoader(object):
     def __init__(self, df_node=pd.DataFrame(), df_edge=pd.DataFrame(), df_city=pd.DataFrame()):
         self.df_node = df_node
