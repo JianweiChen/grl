@@ -23,7 +23,10 @@ def get_graph_plotly_trace_triple(g, **conf):
     hover_func = conf.get("hover_func", lambda x: str(dict(x)))
     disable_text = conf.get('disable_text', True)
     
-    coords_array = np.array(g.layout_kamada_kawai(dim=3).coords)
+    layout_conf = {
+        k: conf[k] for k in conf if k in ('maxiter', )
+    }
+    coords_array = np.array(g.layout_kamada_kawai(dim=3, **layout_conf).coords)
     marks = ['x', 'y', 'z']
     m = {
         f"_{marks[i]}": coords_array[..., i]

@@ -18,6 +18,25 @@ def load_gcg_edge():
 
 def load_gcg_city():
     return pd.read_csv(data_path_("gcg_city.csv"))
+
+def make_vertex_map(v):
+    nodename = v['nodename']
+    nodetype = v['nodetype']
+    parts = nodename.split("_")
+    stopname, citynames, linename, subname, gpstype, stopid = None, None, None, None, None, None
+    if nodetype == 'L':
+        stopname, linename, citynames, stopid = parts
+        stopid = int(stopid)
+    else:
+        stopname, subname, citynames, _, _ , gpstype= parts
+        gpstype = int(gpstype)
+    citynames = citynames.split("|")
+    citycount = len(citynames)
+    return dict(
+        stopname=stopname, linename=linename, subname=subname, citynames=citynames,
+        stopid=stopid, gpstype=gpstype, citycount=citycount
+    )
+
 class Gcg(object):
     """根据原始节点数据框与边数据框生成供查询的图数据
     阅读该代码要求阅读者对pandas比较熟练 否则会有阅读障碍
@@ -27,43 +46,55 @@ class Gcg(object):
     3. 邻边查找
     4. 最近邻搜索
     """
-    def __init__(self, df_node, df_edge):
-        # 消去df_edge中重复的部分 这是因为生成gcg_edge数据框时一个bug导致的 之后会修
-        if True:
-            df_edge = df_edge.groupby(['src', 'tgt'], as_index=False).first()
-        # 检查df_edge中是否包括df_node没有的点（反过来没有必要检查）
-        diffset = set(df_edge.src.tolist()) & set(df_edge.tgt.tolist()) - set(df_node.nodeid.tolist())
-        assert not diffset, "check nodeid in df_edge which not exists in df_node"
-        n2lng = df_node.set_index("nodeid").lng
-        n2lat = df_node.set_index("nodeid").lat
-        gps_arr = df_edge \
-            .assign_by("src", src_lng=n2lng, src_lat=n2lat) \
-            .assign_by('tgt', tgt_lng=n2lng, tgt_lat=n2lat) \
-            [['src_lng', 'src_lat', 'tgt_lng', 'tgt_lat']].to_numpy()
-        df_edge['mht'] = np_mht(gps_arr)
+    def __init__(self, df_node=pd.DataFrame(), df_edge=pd.DataFrame(), g=ig.Graph()):
+        by_node_edge = not (df_node.empty or df_edge.empty)
+        by_g = g.vcount() > 0
+        assert (by_g and not by_node_edge) or (by_node_edge and not by_g), "by_node_edge is True or by_g is True!!!"
+        if by_node_edge:
+            # 消去df_edge中重复的部分 这是因为生成gcg_edge数据框时一个bug导致的 之后会修
+            if True:
+                df_edge = df_edge.groupby(['src', 'tgt'], as_index=False).first()
+            # 检查df_edge中是否包括df_node没有的点（反过来没有必要检查）
+            diffset = set(df_edge.src.tolist()) & set(df_edge.tgt.tolist()) - set(df_node.nodeid.tolist())
+            assert not diffset, "check nodeid in df_edge which not exists in df_node"
+            n2lng = df_node.set_index("nodeid").lng
+            n2lat = df_node.set_index("nodeid").lat
+            gps_arr = df_edge \
+                .assign_by("src", src_lng=n2lng, src_lat=n2lat) \
+                .assign_by('tgt', tgt_lng=n2lng, tgt_lat=n2lat) \
+                [['src_lng', 'src_lat', 'tgt_lng', 'tgt_lat']].to_numpy()
+            df_edge['mht'] = np_mht(gps_arr)
+            
+            df_edgetype_k = pd.DataFrame([
+                ("Ll", 0.0, 1.0, 45.0),
+                ("Ln", 0, 0.0, 1.0),
+                ("Nl", 10/60.0, 0.0, 1.0),
+                ("Lp", 0, 0.0, 1.0),
+                ("Pl", 10/60.0, 0.0, 1.0),
+                ("Pp", 0, 1.0, 5.5),
+                ("Pn", 5/60.0, 1.0, 5.5),
+                ("Np", 5/60.0, 1.0, 5.5),
+                ("Nn", 0, 1.0, 4.5),
+            ], columns=['edgetype', 'k0', 'k1', 'k2']).set_index("edgetype")
+            df_k = df_edge \
+                .assign_by("edgetype", **{kn: df_edgetype_k[kn] for kn in ['k0', 'k1', 'k2']}) \
+                [['mht', 'k0', 'k1', 'k2']]
+            df_edge['weight_default'] = df_k.k0 + df_k.k1 * df_k.mht / df_k.k2
+            self.g = ig.Graph.DataFrame(df_edge, directed=True, vertices=df_node)
+        else:
+            self.g = g
         
-        df_edgetype_k = pd.DataFrame([
-            ("Ll", 0.0, 1.0, 45.0),
-            ("Ln", 0, 0.0, 1.0),
-            ("Nl", 10/60.0, 0.0, 1.0),
-            ("Lp", 0, 0.0, 1.0),
-            ("Pl", 10/60.0, 0.0, 1.0),
-            ("Pp", 0, 1.0, 5.5),
-            ("Pn", 5/60.0, 1.0, 5.5),
-            ("Np", 5/60.0, 1.0, 5.5),
-            ("Nn", 0, 1.0, 4.5),
-        ], columns=['edgetype', 'k0', 'k1', 'k2']).set_index("edgetype")
-        df_k = df_edge \
-            .assign_by("edgetype", **{kn: df_edgetype_k[kn] for kn in ['k0', 'k1', 'k2']}) \
-            [['mht', 'k0', 'k1', 'k2']]
-        df_edge['weight_default'] = df_k.k0 + df_k.k1 * df_k.mht / df_k.k2
-        self.g = ig.Graph.DataFrame(df_edge, directed=True, vertices=df_node)
+        # self.init_from_g(self.g)
+    
+    def init_from_g(self, g):
+        self.g = g
         self.df_vertex = self.g.get_vertex_dataframe()
-        self.df_edge = self.g.get_edge_dataframe().set_index(["source", "target"])
+        self.df_edge = self.g.get_edge_dataframe()
         self.df_gps = self.df_vertex.groupby("nodetype").get_group("N").reset_index()
         from scipy.spatial import KDTree
         gps_array = self.df_gps[['lng', 'lat']].to_numpy()
         self.kdtree = KDTree(gps_array)
+        self.set_vertex_attr()
     
     def get_random_vertex_id(self):
         vid = random.randint(0, self.df_vertex.shape[0])
@@ -82,7 +113,14 @@ class Gcg(object):
         paths = self.g.get_shortest_paths(src_vid, tgt_vid, weights='weight_default')[0]
         return paths
 #         print(src_ri[0], tgt_ri[0])
-    
+    def get_shortest_paths(self, v, to):
+        result = self.g.get_shortest_paths(v, to, weights='weight_default')
+        return result
+    def set_vertex_attr(gcg):
+        gcg.g.vs['_m'] = [make_vertex_map(v) for v in gcg.g.vs]
+        for key in gcg.g.vs[0]['_m'].keys():
+            gcg.g.vs[key] = [v['_m'][key] for v in gcg.g.vs]
+        del gcg.g.vs['_m']
 class GcgDataLoader(object):
     def __init__(self, df_node=pd.DataFrame(), df_edge=pd.DataFrame(), df_city=pd.DataFrame()):
         self.df_node = df_node
@@ -169,9 +207,21 @@ class GcgDataLoader(object):
     def save_gcg(self, cityid, neighbor=0):
         gcg = self.get_gcg(cityid, neighbor)
         dill.dump(gcg, pathlib.Path(data_path_(f"gcg_{cityid}_{neighbor}.dill")).open("wb"))
+
     
+    def get_global_gcg(self):
+        if not self.inited:
+            self.init()
+        gcg = Gcg(self.df_node.reset_index(), self.df_edge)
+        return gcg
+    
+    def load_gcg_from_path(self, path):
+        gcg = dill.load(pathlib.Path(data_path_(path)).open("rb"))
+        gcg.init_from_g(gcg.g)
+        return gcg
     def load_gcg(self, cityid, neighbor=0):
         gcg = dill.load(pathlib.Path(data_path_(f"gcg_{cityid}_{neighbor}.dill")).open("rb"))
+        gcg.init_from_g(gcg.g)
         return gcg
 
 def desc_city():
