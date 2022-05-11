@@ -101,23 +101,7 @@ class Gcg(object):
     def get_random_vertex_id(self):
         vid = random.randint(0, self.df_vertex.shape[0])
         return vid        
-        
-    def query(self, ori_gps, dst_gps, ts):
-        ori_vid = self.g.vcount()
-        self.g.add_vertex("ori")
-        dst_vid = self.g.vcount()
-        self.g.add_vertex("dst")
-        
-        src_rd, src_ri = self.kdtree.query(ori_gps)
-        tgt_rd, tgt_ri = self.kdtree.query(dst_gps)
-        src_vid = self.df_gps.loc[src_ri]['vertex ID']
-        tgt_vid = self.df_gps.loc[tgt_ri]['vertex ID']
-        paths = self.g.get_shortest_paths(src_vid, tgt_vid, weights='weight_default')[0]
-        return paths
-#         print(src_ri[0], tgt_ri[0])
-    def get_shortest_paths(self, v, to):
-        result = self.g.get_shortest_paths(v, to, weights='weight_default')
-        return result
+
     def set_vertex_attr(gcg):
         gcg.g.vs['_m'] = [make_vertex_map(v) for v in gcg.g.vs]
         for key in gcg.g.vs[0]['_m'].keys():
