@@ -142,6 +142,17 @@ class Gcg(object):
         feat = np.stack([self.epath_to_feat(_) for _ in paths], axis=0)
         feat = np.concatenate([gps, dis, feat, gentype], axis=1)
         return feat
+
+    def get_pmconv_dots(gcg, org, dst, **kwargv):
+        """这是伪方法 只是拿到一条可用的路线 真正的pmconv待开发
+        """
+        ori_vid = gcg.df_gps.loc[gcg.kdtree.query(org)[1]][0]
+        dst_vid = gcg.df_gps.loc[gcg.kdtree.query(dst)[1]][0]
+        paths = gcg.g.get_shortest_paths(ori_vid, dst_vid, weights='weight')
+        path = paths[0]
+        vs = gcg.g.vs.select(path)
+        return list(zip(vs['lng'], vs['lat'], vs['stopname'], vs['nodetype']))
+        
 class GcgDataLoader(object):
     def __init__(self, df_node=pd.DataFrame(), df_edge=pd.DataFrame(), df_city=pd.DataFrame()):
         self.df_node = df_node
