@@ -13,7 +13,7 @@ import ipywidgets
 import random
 import ipyleaflet
 from grl.data_util import data_path_
-from grl.data_util import GcgDataLoader, Gcg
+from grl.gcg_util import GcgDataLoader, Gcg
 
 def get_enname(hz):
     hz = hz.replace("市", '')
