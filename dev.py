@@ -20,6 +20,10 @@ import collections
 import pypinyin
 import plotly.graph_objects as go
 import dill
+import ipyvuetify as ipyv
+import ipyleaflet
+import traitlets
+
 
 DATA_PATH = "/Users/didi/Desktop/data"
 def data_path_(p):
@@ -613,7 +617,11 @@ def compile_sid(df_sid):
         df_edge_nn,
         df_edge_pp,
     ], axis=0) \
-    .reset_index(drop=True)
+    .reset_index(drop=True) \
+    .groupby(['src', 'tgt'], as_index=False) \
+    .agg(edgetype=('edgetype', 'first'))
+
+    df_edge['edgetype'] = df_edge['edgetype'].str.replace("l", 's')
 
     return df_vertex, df_edge
 
@@ -635,17 +643,67 @@ def get_dfv_near(dfv_all, coordinate, a):
     vids = kdtree.query_ball_point(coordinate, d)
     dfv_selected = dfv_all.loc[vids].sort_values(['lng', 'lat']).reset_index(drop=True)
     return dfv_selected
-def get_g_near(dfv, dfe, coordinate, a):
+
+def get_v_and_e_dataframe_near(dfv, dfe, coordinate, a):
     dfv_selected = get_dfv_near(dfv, coordinate, a)
-    dfe_selected = dfe.set_index("src").join(dfv_selected.set_index("vertex_name")[['nodetype']]) \
-        .query("nodetype==nodetype") \
-        .rename_axis('src') \
-        .reset_index() \
-        .drop("nodetype", axis=1) \
-        .reset_index(drop=True)
+    # dfv_nodetype = dfv_selected.set_index("vertex_name")['nodetype']
+    # tc = time.time()
+    # print(tc)
+    # dfv_index = dfv_selected.set_index("vertex_name").index
+    dfv_index = dfv_selected['vertex_name'].tolist()
+    source_index_list = dfe.reset_index().set_index("src").loc[dfv_index]['index'].tolist()
+    target_index_list = dfe.reset_index().set_index("tgt").loc[dfv_index]['index'].tolist()
+    index_list = list(set(source_index_list+target_index_list))
+    dfe_selected = dfe.loc[index_list]
+    # print(time.time()-tc)
+    # dfe_selected = dfe \
+    #     .set_index("src").join(dfv_nodetype) \
+    #     .rename(dict(nodetype='src_nodetype'), axis=1) \
+    #     .rename_axis('src') \
+    #     .reset_index() \
+    #     .set_index('tgt').join(dfv_nodetype) \
+    #     .rename(dict(nodetype='tgt_nodetype'), axis=1) \
+    #     .rename_axis('tgt') \
+    #     .reset_index() \
+    #     .query("src_nodetype==src_nodetype or tgt_nodetype==tgt_nodetype") \
+    #     [['src', 'tgt', 'edgetype']]
     dfv_selected = dfv.set_index("vertex_name") \
         .loc[list(set(dfe_selected.src.tolist() + dfe_selected.tgt.tolist()))] \
         .reset_index()
+    return dfv_selected, dfe_selected
+def add_weight_default_column(dfe):
+    dfk = pd.DataFrame([
+        ('ss', 0, 1, 55),
+        ('nn', 0, 1, 4.5),
+        ('np', 1.5/60, 1, 5.5),
+        ('pn', 1.5/60, 1, 5.5),
+        ('pp', 0, 1, 5.5),
+        ('sn', 0, 0, 1),
+        ('ns', 6/60, 0, 1),
+        ('sp', 0, 0, 1),
+        ('ps', 3/60, 0, 1),
+    ], columns=['edgetype', 'k0', 'k1', 'k2']) \
+    .set_index("edgetype")
+    dfe = dfe \
+        .assign_by('edgetype', _k0=dfk.k0, _k1=dfk.k1, _k2=dfk.k2) \
+        .assign(weight0=lambda xdf: xdf._k0+xdf.mht*xdf._k1 / xdf._k2)
+    dfe = dfe[['src', 'tgt', 'edgetype', 'mht', 'weight0']].reset_index(drop=True)
+    return dfe
+def get_g_near(dfv, dfe, coordinate, a):
+    """
+    >>> g = get_g_near(dfv, dfe, [123.08778,41.21388], 5)
+    """
+    dfv_selected, dfe_selected = get_v_and_e_dataframe_near(dfv, dfe, coordinate, a)
+    v2lng = dfv_selected.set_index("vertex_name").lng
+    v2lat = dfv_selected.set_index("vertex_name").lat
+
+    arr = dfe_selected \
+    .assign_by("src", srclng=v2lng, srclat=v2lat) \
+    .assign_by("tgt", tgtlng=v2lng, tgtlat=v2lat) \
+    [['srclng', 'srclat', 'tgtlng', 'tgtlat']] \
+    .to_numpy()
+    dfe_selected = dfe_selected.assign(mht=np_mht(arr))
+    dfe_selected = add_weight_default_column(dfe_selected)
     g = ig.Graph.DataFrame(dfe_selected, directed=True, vertices=dfv_selected)
     return g
 
@@ -670,3 +728,56 @@ def get_busgraph_go_trace(arr, nodetype_column, name, color='blue'):
         )
     )
     return trace
+
+def query_stopname(df_desc, pattern):
+    """
+    >>> query_stopname(df_desc, "上海")
+    """
+    return df_desc.query(f"stopname.str.contains('{pattern}')").sort_values("desc")
+class Vizmap(traitlets.HasTraits):
+    def __init__(self, coordinate=[116.35366,39.98274]):
+        super().__init__()
+        def on_click_btn(*args):
+            self.dialog.v_model = True
+        def on_m_interaction(**kwargv):
+            if kwargv.get('type') == 'click':
+                coordinate = kwargv.get("coordinates")
+                coordinate = [
+                    round(coordinate[0], 5),
+                    round(coordinate[1], 5),
+                ]
+                self.marker.location = self.coordinate = coordinate
+                # self.marker.location = self.coordinate = coordinate
+                
+        self.zoom = 13
+        self.coordinate = coordinate[::-1]
+        self.width = 800
+        self.m = ipyleaflet.Map(
+            basemap=ipyleaflet.basemap_to_tiles(ipyleaflet.basemaps.Gaode.Normal), 
+            zoom=zoom,
+            scroll_wheel_zoom=True,
+            center=coordinate[::-1]
+        )
+        self.marker = ipyleaflet.Marker(location=coordinate[::-1], draggable=False)
+        self.m.add_layer(self.marker)
+        self.m.on_interaction(on_m_interaction)
+        self.btn = ipyv.Btn(children=['pop'])
+        self.dialog = \
+            ipyv.Dialog(children=[
+                ipyv.Card(children=[
+                    self.m
+                ], width=self.width),
+            ], v_model=False, width=self.width)
+        self.btn.on_event('click', on_click_btn)
+        # ipywidgets.jslink((self.text_field, 'v_model'), (self, 'coordinate'))
+        self.container = \
+            ipyv.Container(children=[
+                self.btn,
+                self.dialog
+            ])
+    @property
+    def gps(self):
+        return self.coordinate[::-1]
+    @property
+    def gpskey(self):
+        return ','.join([str(_) for _ in self.gps])
