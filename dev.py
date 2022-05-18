@@ -19,7 +19,7 @@ import networkx as nx
 import collections
 import pypinyin
 import plotly.graph_objects as go
-
+import dill
 
 DATA_PATH = "/Users/didi/Desktop/data"
 def data_path_(p):
@@ -365,11 +365,12 @@ def make_desc_test_version():
     K = 100_000
     df_stop['lng'] = df_stop.lng.apply(lambda x: float(int(x*K)/K))
     df_stop['lat'] = df_stop.lat.apply(lambda x: float(int(x*K)/K))
-    df_desc = df_stop[['stopid', 'lineid', 'desc', 'lng', 'lat']] \
+    df_desc = df_stop[['stopid', 'lineid', 'desc', 'lng', 'lat', 'sequenceno']] \
         .groupby('stopid').first() \
         .reset_index() \
         .assign_by("lineid", lid=df_lineid2lid.lid) \
-        [['lid', 'lng', 'lat', 'desc', 'lineid', 'stopid']]
+        [['lid', 'lng', 'lat', 'desc', 'lineid', 'stopid', 'sequenceno']] \
+        .rename(dict(sequenceno='seq'), axis=1)
     df_desc.to_csv(data_path_("desc.csv"), index=False)
 
 def df_sid_join_gc_test_version(df_sid):
@@ -455,5 +456,217 @@ def fill_empty_gc_for_gate_sid(row):
         gc = str([row.lng, row.lat])
     return gc
 
+def load_desc_df(path=data_path_("desc.csv")):
+    df = pd.read_csv(path).set_index(['lid', 'seq']) \
+        [['desc', 'stopid', 'lineid', 'lng', 'lat']] \
+        .assign(stopname=lambda xdf: xdf.desc.str.split('_').apply(lambda x: x[1])) \
+        .assign(linename=lambda xdf: xdf.desc.str.split('_').apply(lambda x: x[0])) \
+        .assign(coordinate=lambda xdf: xdf.lng.astype('str')+','+xdf.lat.astype('str'))
+    return df
+
 ## use kdtree
 from scipy.spatial import KDTree
+
+def get_coordinate_by_city_name(df_city, city_name):
+    df_city = df_city.set_index("city_name")
+    if city_name not in df_city.index:
+        return (0.0, 0.0)
+    sr = df_city.loc[city_name]
+    return (sr.center_lng, sr.center_lat)
+
+def get_neighbor_within(kdtree, kdis, name, df_city):
+    coordinate = get_coordinate_by_city_name(df_city, name)
+    index_list = kdtree.query_ball_point(coordinate, r=kdis/110)
+    df = df_city.loc[index_list] \
+        .assign(query_lng=coordinate[0]) \
+        .assign(query_lat=coordinate[1])
+    gps_array = df[['center_lng', 'center_lat', 'query_lng', 'query_lat']].to_numpy()
+    xy_array = np_coords(gps_array)
+    theta = np.degrees(np.arctan2(xy_array[..., 1], xy_array[..., 0]))
+    ro = np.linalg.norm(xy_array, axis=1)
+    df['ro'] = ro
+    
+    theta += 360.0 * (theta<0).astype('float32')
+    theta = 90.0 - theta
+    clock = theta / 30
+    clock += 12.0 * (clock<0).astype('float32')
+    df['clock'] = clock
+    df.pop('query_lng')
+    df.pop('query_lat')
+    df.pop("city_level")
+    df.pop("car_prefix")
+    df = df.set_index("city_id") 
+    df = df.sort_values("clock") \
+        .reset_index()
+    return df
+
+def load_df_sid(path):
+    df = pd.read_csv(path).set_index("sid")
+    df2 = df.query("gate>0").apply(axis=1, func=fill_empty_gc_for_gate_sid).rename("gc").to_frame()
+    df.update(df2)
+    return df
+
+def make_gps_vertex_name_col(xdf):
+    return xdf.gate.apply(lambda x: ['n', 'p'][x]) + '_' \
+        +xdf.lng.astype(str)+'_' \
+        +xdf.lat.astype(str)+'_' \
+        +xdf.gate.astype(str)
+def make_linestop_vertex_name_col(xdf):
+    return 's_'+xdf.lid.astype(str)+'_'+xdf.seq.astype(str)+'_'+xdf.gate.astype(str)
+def make_gc_gps_vertex_name_col(xdf):
+    def make_gc_gps_vertex_name_col_by_row(row):
+        return [f'n_{_[0]}_{_[1]}_1' for _ in np.array(eval(row.gc)).reshape((-1, 2)).tolist()]
+    return xdf.apply(axis=1, func=make_gc_gps_vertex_name_col_by_row)
+
+def get_edge_xx(df_x):
+    df_x = df_x.reset_index(drop=True)
+    kdtree = KDTree(df_x[['lng', 'lat']].to_numpy())
+
+    neighbor_ids_column = kdtree.query_ball_point(df_x[['lng', 'lat']].to_numpy(), 0.8/110)
+
+    df_edge_xx = df_x \
+        .rename(dict(vertex_name='src'), axis=1) \
+        [['src']] \
+        .assign(tgt_id=neighbor_ids_column) \
+        .explode('tgt_id') \
+        .astype(dict(tgt_id='int')) \
+        .set_index("tgt_id") \
+        .assign(tgt=df_x.vertex_name) \
+        .reset_index() \
+        [['src', 'tgt']]
+    return df_edge_xx
+def compile_sid(df_sid):
+    """对df_sid进行编译
+    """
+    df_l = df_sid.assign(vertex_name=make_linestop_vertex_name_col) \
+        .reset_index()
+    df_l_vertex = df_l[['vertex_name', 'lng', 'lat']] \
+        .assign(nodetype='s')
+    df_gps = df_l.assign(gps_vertex_name=make_gps_vertex_name_col)
+    df_gps_with_gate = df_gps.query("gate>0").assign(gc=make_gc_gps_vertex_name_col)
+    df_gps_without_gate = df_gps.query("gate==0")
+
+    df_n1_vertex = df_gps_without_gate.groupby("gps_vertex_name").agg(lng=('lng', 'first'), lat=('lat', 'first')) \
+        .rename_axis("vertex_name").reset_index() \
+        [['vertex_name', 'lng', 'lat']]
+
+    df_n2_vertex = df_gps_with_gate.gc.explode().to_frame() \
+        .assign(
+            lng=lambda xdf: xdf.gc.str.split("_").apply(lambda x: x[1]).astype(float),
+            lat=lambda xdf: xdf.gc.str.split("_").apply(lambda x: x[2]).astype(float),) \
+        .rename(dict(gc='vertex_name'), axis=1)
+
+    df_n_vertex = pd.concat([df_n1_vertex, df_n2_vertex], axis=0).reset_index(drop=True) \
+        .assign(nodetype='n') \
+        .groupby("vertex_name", as_index=False).first()
+
+
+    df_p_vertex = df_gps_with_gate \
+        [["gps_vertex_name", 'lng', 'lat']] \
+        .rename(dict(gps_vertex_name='vertex_name'), axis=1) \
+        .assign(nodetype='p') \
+        .groupby("vertex_name", as_index=False).first()
+
+
+    df_vertex = pd.concat([
+        df_l_vertex, df_n_vertex, df_p_vertex,
+    ], axis=0).reset_index(drop=True)
+
+    df_edge_ll = df_l[['vertex_name', 'lid']].rename(dict(vertex_name='src', lid='srclid'), axis=1)
+    df_edge_ll2 = df_edge_ll.rename(dict(src='tgt', srclid='tgtlid'), axis=1) \
+        .shift(-1) \
+        .fillna(0) \
+        .astype(dict(tgtlid='int')) \
+        .reset_index(drop=True)
+    df_edge_ll = df_edge_ll.assign(tgt=df_edge_ll2.tgt, tgtlid=df_edge_ll2.tgtlid) \
+        .query("srclid==tgtlid") \
+        [['src', 'tgt']] \
+        .assign(edgetype='ll')
+
+    df_edge_lp = df_gps_with_gate[['vertex_name', 'gps_vertex_name']] \
+        .rename(dict(vertex_name='src', gps_vertex_name='tgt'), axis=1) \
+        .assign(edgetype='lp')
+    df_edge_pl = df_edge_lp.rename(dict(src='tgt', tgt='src'), axis=1).assign(edgetype='pl')
+
+    df_edge_ln = df_gps_without_gate[['vertex_name', 'gps_vertex_name']] \
+        .rename(dict(vertex_name='src', gps_vertex_name='tgt'), axis=1) \
+        .assign(edgetype='ln')
+    df_edge_nl = df_edge_ln.rename(dict(src='tgt', tgt='src'), axis=1).assign(edgetype='nl')
+
+    df_edge_pn = df_gps_with_gate[['gps_vertex_name', 'gc']].rename(dict(gps_vertex_name='src', gc='tgt'), axis=1) \
+        .assign(edgetype='pn') \
+        .explode('tgt')
+    df_edge_np = df_edge_pn.rename(dict(src='tgt', tgt='src'), axis=1).assign(edgetype='np')
+
+
+    df_edge_nn = get_edge_xx(df_n_vertex).assign(edgetype='nn')
+    df_edge_pp = get_edge_xx(df_p_vertex).assign(edgetype='pp')
+
+    df_edge = pd.concat([
+        df_edge_ll,
+        df_edge_np,
+        df_edge_pn,
+        df_edge_lp,
+        df_edge_pl,
+        df_edge_ln,
+        df_edge_nl,
+        df_edge_nn,
+        df_edge_pp,
+    ], axis=0) \
+    .reset_index(drop=True)
+
+    return df_vertex, df_edge
+
+def run_compile_busgraph():
+    df_sid = load_df_sid(data_path_("sid.csv"))
+    df_vertex, df_edge = compile_sid(df_sid)
+    df_vertex.to_csv(data_path_("busgraph_vertex.csv"), index=None)
+    df_edge.to_csv(data_path_("busgraph_edge.csv"), index=None)
+def load_busgraph_vertex():
+    df = pd.read_csv(data_path_("busgraph_vertex.csv"))
+    return df
+def load_busgraph_edge():
+    df = pd.read_csv(data_path_("busgraph_edge.csv"))
+    return df
+def get_dfv_near(dfv_all, coordinate, a):
+    d = a / 110
+    dfv_all = dfv_all.reset_index(drop=True)
+    kdtree = KDTree(dfv_all[['lng', 'lat']].to_numpy())
+    vids = kdtree.query_ball_point(coordinate, d)
+    dfv_selected = dfv_all.loc[vids].sort_values(['lng', 'lat']).reset_index(drop=True)
+    return dfv_selected
+def get_g_near(dfv, dfe, coordinate, a):
+    dfv_selected = get_dfv_near(dfv, coordinate, a)
+    dfe_selected = dfe.set_index("src").join(dfv_selected.set_index("vertex_name")[['nodetype']]) \
+        .query("nodetype==nodetype") \
+        .rename_axis('src') \
+        .reset_index() \
+        .drop("nodetype", axis=1) \
+        .reset_index(drop=True)
+    dfv_selected = dfv.set_index("vertex_name") \
+        .loc[list(set(dfe_selected.src.tolist() + dfe_selected.tgt.tolist()))] \
+        .reset_index()
+    g = ig.Graph.DataFrame(dfe_selected, directed=True, vertices=dfv_selected)
+    return g
+
+def get_busgraph_go_trace(arr, nodetype_column, name, color='blue'):
+    #TODO
+    assert arr.shape[1] in (2, 4)
+    mode = 'markers' if arr.shape[1]==2 else 'line'
+    nodetype2z = dict(
+        n=0.0, p=1.0, s=2.0
+    )
+    nodetype2z = dict()
+    trace = go.Scatter3d(
+        x=arr[..., 0],
+        y=arr[..., 1],
+        z=nodetype_column.apply(lambda x: nodetype2z.get(x, 0.0)).tolist(),
+        mode=mode,
+        hoverinfo=None,
+        marker=dict(
+            size=5.,
+            opacity=0.5,
+            color=color
+        )
+    )
+    return trace
