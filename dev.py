@@ -166,40 +166,6 @@ def _pandas_assign_join_col(df, **kwargv)->pd.DataFrame:
         df = df.assign(**{output_col: output_series})
     return df
 
-"""可以考虑将公交图分割成若干块
-只有将这种管理上的连续化做好 事情才能更容易的做下去
-需要cover住所有不确定的情况 step by step
-两个点之间的各种距离 都可以使用四种特征来确定
-
-N- Sign
-P- Platform
-E- Entrance
-T- Track
-B- Bus
-这种设计T和B的关键区别定要名正言顺 关键是T要有进站操作 进站要买票
-
-站外走路 Nn, Ne, En, Ee
-站内走路 Pp, Pe, Ep
-坐车 Bb, Tt
-上下车 Bn, Nb, Tp, Pt
-特别的Ee表示火车站出来进地铁或者机场线这种 Pp转Ee操作
-
-line_group: 6hao#9879987
-cluster_group: beijing#1
-stop_name: handianhuangzhuang#123213219
-sequence_no: 1,2,3,4...
-direction: 0, 1
-lng
-lat
-platform_type: 0, 1
-loop_type: 0, 1, 2
-schedules: 1#10:00, 2#10:10, 3#10:20, 5#10:30... 11:15
-schedule_type: detail/pattern 详情类型与模式类别
-tripcount: 0
-entrances: Akou#12314213
-
-经纬度这个东西实际是均匀的
-"""
 
 def to_pinyin(s):
     rs = pypinyin.pinyin(s, style=0)
