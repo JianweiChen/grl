@@ -428,6 +428,10 @@ def fill_empty_gc_for_gate_sid(row):
     return gc
 
 def load_desc_df(path=data_path_("desc.csv")):
+    """
+    >>> df_desc = load_desc_df()
+    >>> df_desc.query("stopname.str.contains('知春路')")
+    """
     df = pd.read_csv(path).set_index(['lid', 'seq']) \
         [['desc', 'stopid', 'lineid', 'lng', 'lat']] \
         .assign(stopname=lambda xdf: xdf.desc.str.split('_').apply(lambda x: x[1])) \
@@ -658,6 +662,8 @@ def add_weight_default_column(dfe):
     return dfe
 def get_g_near(dfv, dfe, coordinate, a):
     """
+    >>> dfv = load_busgraph_vertex()
+    >>> dfe = load_busgraph_edge()
     >>> g = get_g_near(dfv, dfe, [123.08778,41.21388], 5)
     """
     dfv_selected, dfe_selected = get_v_and_e_dataframe_near(dfv, dfe, coordinate, a)
