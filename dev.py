@@ -23,6 +23,7 @@ import dill
 import ipyvuetify as ipyv
 import ipyleaflet
 import traitlets
+import redis
 
 
 DATA_PATH = "/Users/didi/Desktop/data"
@@ -754,7 +755,7 @@ class Vizmap(traitlets.HasTraits):
         self.width = 800
         self.m = ipyleaflet.Map(
             basemap=ipyleaflet.basemap_to_tiles(ipyleaflet.basemaps.Gaode.Normal), 
-            zoom=zoom,
+            zoom=self.zoom,
             scroll_wheel_zoom=True,
             center=coordinate[::-1]
         )
@@ -781,3 +782,42 @@ class Vizmap(traitlets.HasTraits):
     @property
     def gpskey(self):
         return ','.join([str(_) for _ in self.gps])
+
+def save_desc_to_redis():
+    from tqdm import tqdm
+    import redis
+    client = redis.StrictRedis(host='127.0.0.1', port=6379, db=0)
+#     df_desc = load_desc_df(data_path_("desc.csv"))
+    df = df_desc \
+        .reset_index() \
+        .assign(key=lambda xdf: xdf.lid.astype('str')+'_'+xdf.seq.astype('str')) \
+        .sort_values(['lid','seq']) \
+        [['key', 'desc']] \
+        .reset_index(drop=True)
+    i = 0
+    B = 1024
+    for i in tqdm(range(df.shape[0]//B+10)):
+        _df = df.iloc[i*B: (i+1)*B]
+        if _df.empty:
+            break
+        mapping = dict(_df.to_numpy().tolist())
+        client.hset("desc", mapping=mapping)
+    
+def get_desc_from_bin(b):
+    if not b:
+        return 'x_x'
+    else:
+        return b.decode()
+
+def get_g_vertex_gps_array_by(g, center):
+    gps_arr = g.get_vertex_dataframe()[['lng', 'lat']].to_numpy()
+    return np.concatenate([gps_arr, np.broadcast_to(center, gps_arr.shape)], axis=1)
+
+def get_g_edge_gps_arr(g):
+    df_coor = g.get_vertex_dataframe()[['lng', 'lat']]
+    gps_arr = g.get_edge_dataframe() \
+        .assign_by('source', src_lng=df_coor.lng, src_lat=df_coor.lat) \
+        .assign_by("target", tgt_lng=df_coor.lng, tgt_lat=df_coor.lat) \
+        [['src_lng', 'src_lat', 'tgt_lng', 'tgt_lat']] \
+        .to_numpy()
+    return gps_arr
