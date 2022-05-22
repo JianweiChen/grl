@@ -1,4 +1,5 @@
 ## Write only functions, not classes if necessary
+# my: 2731289611338
 # def ej():
 #     import pathlib
 #     exec(pathlib.Path("/Users/didi/Desktop/repos/grl/dev.py").open('r').read(), globals())
@@ -24,6 +25,7 @@ import ipyvuetify as ipyv
 import ipyleaflet
 import traitlets
 import redis
+import igraph
 
 
 DATA_PATH = "/Users/didi/Desktop/data"
@@ -608,6 +610,7 @@ def load_busgraph_edge():
     df = pd.read_csv(data_path_("busgraph_edge.csv"))
     return df
 def get_dfv_near(dfv_all, coordinate, a):
+    # deprecated!! read get_dfvnp_near
     d = a / 110
     dfv_all = dfv_all.reset_index(drop=True)
     kdtree = KDTree(dfv_all[['lng', 'lat']].to_numpy())
@@ -677,8 +680,14 @@ def get_g_near(dfv, dfe, coordinate, a):
     .to_numpy()
     dfe_selected = dfe_selected.assign(mht=np_mht(arr))
     dfe_selected = add_weight_default_column(dfe_selected)
+    dfv_selected = dfv_selected.sort_values(["nodetype", 'lng', 'lat'])
     g = ig.Graph.DataFrame(dfe_selected, directed=True, vertices=dfv_selected)
+    set_busgraph_default_attr(g)
     return g
+
+def set_busgraph_default_attr(g):
+    g['kdtree'] = get_busgraph_kdtree(g)
+    g.vs['gps'] = [[_['lng'], _['lat']] for _ in g.vs]
 
 def get_busgraph_go_trace(arr, nodetype_column, name, color='blue'):
     #TODO
@@ -781,6 +790,17 @@ def get_desc_from_bin(b):
     else:
         return b.decode()
 
+def get_desc_from_lidseq(lidseq_tps):
+    assert isinstance(lidseq_tps, list)
+    assert isinstance(lidseq_tps[0], tuple) or isinstance(lidseq_tps[0], list)
+    assert lidseq_tps[0].__len__() == 2
+    keys = [
+        f"{_[0]}_{_[1]}" for _ in lidseq_tps
+    ]
+    vals = [get_desc_from_bin(_) for _ in client.hmget("desc", keys)]
+    return dict(zip(keys, vals))
+do_desc = get_desc_from_lidseq
+
 def get_g_vertex_gps_array_by(g, center):
     gps_arr = g.get_vertex_dataframe()[['lng', 'lat']].to_numpy()
     return np.concatenate([gps_arr, np.broadcast_to(center, gps_arr.shape)], axis=1)
@@ -793,3 +813,327 @@ def get_g_edge_gps_arr(g):
         [['src_lng', 'src_lat', 'tgt_lng', 'tgt_lat']] \
         .to_numpy()
     return gps_arr
+
+def get_polar_coordinate(gps_arr, ka=10, kd=1, ta=1000):
+    coordinate = np_coords(gps_arr)
+    degree = np.degrees(np.arctan2(coordinate[..., 0], coordinate[..., 1]))
+    degree += (degree<0).astype('float32') * 360
+    amplitude = np.linalg.norm(coordinate, axis=1)
+    
+    degree *= kd
+    amplitude *= ka
+    
+    degree = degree.astype('int')
+    amplitude = amplitude.astype('int')
+    return np.stack([degree, amplitude], axis=1)
+
+def parse_orders(orders, precision=3):
+    orders = orders.split(',')
+    ods = []
+    coords = []
+    for order in orders:
+        parts = order.split('_')
+        coords.append([round(float(_), precision) for _ in parts[1:]])
+    gps_arr = np.array(coords)
+    mht = np_mht(gps_arr)
+    dftv = pd.Series(gps_arr.reshape([-1, 2]).tolist()).apply(tuple) \
+        .rename("name").to_frame() \
+        .groupby("name") \
+        .size() \
+        .rename("vc") \
+        .to_frame() \
+        .reset_index() \
+        .sort_values("vc", ascending=False)
+    dfte = pd.DataFrame(dict(src=gps_arr[..., :2].tolist(), tgt=gps_arr[..., 2:].tolist(), mht=mht))
+    dfte['src'] = dfte['src'].apply(tuple)
+    dfte['tgt'] = dfte['tgt'].apply(tuple)
+    dfte = dfte.groupby(['src', 'tgt'], as_index=False).agg(mht=('mht', 'first'), ec=('mht', 'count'))
+    g = ig.Graph.DataFrame(dfte, directed=True, vertices=dftv)
+    return g
+
+def get_g_subway(dfv, dfe):
+    dfv_selected = dfv \
+        .assign(gate=dfv.vertex_name.str.split('_') \
+        .apply(lambda x: x[-1]).astype('int')) \
+        .query("gate>0") \
+        .reset_index(drop=True)
+    vnames = dfv_selected.vertex_name.tolist()
+    dfe_selected = dfe \
+        .set_index("src") \
+        .loc[vnames] \
+        .reset_index() \
+        .set_index("tgt") \
+        .loc[vnames] \
+        .reset_index() \
+        [['src', 'tgt', 'edgetype']]
+    v2lng = dfv_selected.set_index("vertex_name").lng
+    v2lat = dfv_selected.set_index("vertex_name").lat
+    arr = dfe_selected \
+        .assign_by("src", srclng=v2lng, srclat=v2lat) \
+        .assign_by("tgt", tgtlng=v2lng, tgtlat=v2lat) \
+        [['srclng', 'srclat', 'tgtlng', 'tgtlat']] \
+        .to_numpy()
+    dfe_selected = dfe_selected.assign(mht=np_mht(arr))
+    dfe_selected = add_weight_default_column(dfe_selected)
+
+    g = igraph.Graph.DataFrame(dfe_selected, directed=True, vertices=dfv_selected)
+    return g
+
+def load_g_subway(path=data_path_("g_subway.dill")):
+    g = dill.load(pathlib.Path(path).open('rb'))
+    g.vs['gps'] = [[_['lng'], _['lat']] for _ in g.vs]
+    return g
+
+def load_g_sample_subway(path=data_path_("g_sample_subway.dill")):
+    return load_g_subway(path)
+
+def get_busgraph_kdtree(g):
+    kdtree = KDTree(g.get_vertex_dataframe().query("nodetype!='s'")[['lng', 'lat']].to_numpy())
+    return kdtree
+
+def query_ball_point_vids(g, coordinate, km):
+    return g['kdtree'].query_ball_point(coordinate, km/110)
+
+
+def get_candidates_by_gps(g, gps, km=0.8):
+    vids = g['kdtree'].query_ball_point(gps, km/110)
+    return g.vs[vids]
+
+def get_candidates_by_vid(g, vid, km=0.8):
+    vids = g.neighborhood(vid, g.vcount(), mindist=1, mode='out')
+    if not vids:
+        return g.vs[vids]
+    vs = g.vs[vids]
+    vids = functools.reduce(
+        lambda x, y: x+y,
+        g['kdtree'].query_ball_point(vs['gps'], km/110),
+        []
+    )
+    vids = list(set(vids))
+    return g.vs[vids]
+
+def get_near_sid_g(df_sid, coordinate, km):
+    df = df_sid.loc[kdtree.query_ball_point(coordinate, km/110)].sort_values(['lid', 'seq'])
+    df['key'] = df.lid.astype('str') + "_" + df.seq.astype('str')
+    df2 = df[['key', 'lid', 'seq']].sort_values(['lid', 'seq']).reset_index(drop=True)
+    dfv_selected = df[['key', 'lid', 'seq', 'lng', 'lat']]
+    dfe_selected = pd.concat([
+        df2,
+        df2.shift(-1).rename({_:_+"_shifted" for _ in df2.columns}, axis=1).reset_index(drop=True)
+    ], axis=1) \
+    .query("key_shifted==key_shifted") \
+    .astype({'lid_shifted': 'int', 'seq_shifted': 'int'}) \
+    .query("lid==lid_shifted") \
+    [['key', 'key_shifted']] \
+    .rename(dict(key='src', key_shifted='tgt'), axis=1)
+    g = ig.Graph.DataFrame(dfe_selected, directed=True, vertices=dfv_selected)
+    g.vs['gps'] = [(_['lng'], _['lat']) for _ in g.vs]
+    g.vs['lidseq'] = [(_['lid'], _['seq']) for _ in g.vs]
+    g['kdtree'] = KDTree(g.get_vertex_dataframe()[['lng', 'lat']].to_numpy())
+    return g
+
+def report_onestep(ctx, history, need_desc=False):
+    """这个函数主要用于打印机器学习过程中的数值解
+    """
+    g = ctx['g']
+    origin = ctx['origin']
+    destination = ctx['destination']
+    v = history[-1]
+    stepcount = len(history)
+
+    gps = v['gps']
+    lidseq = v['lidseq']
+    lid = v['lid']
+    seq = v['seq']
+    gps_arr = np.array([
+        [*origin, *gps],
+        [*gps, *destination]
+    ])
+    coords = np.round(np_coords(gps_arr), 4).tolist()
+    
+    to_report = dict(
+        stepcount=stepcount,
+        gps=gps,
+        lidseq=lidseq,
+        ori_coords = coords[0],
+        dst_coords = coords[1]
+    )
+    if need_desc:
+        to_report['desc'] = do_desc([lidseq]).get(f"{lid}_{seq}")
+    
+    for k, v in to_report.items():
+        print(k, '=', v)
+    print()
+
+
+def query_guidepost(g, guidepost_req_jd):
+    origin = guidepost_req_jd['origin']
+    destination = guidepost_req_jd['destination']
+    abparam = guidepost_req_jd['abparam']
+
+    need_desc = abparam.get("need_desc", False)
+    need_report = abparam.get("need_report", False)
+    ctx = {
+        'g': g,
+        "origin": origin,
+        "destination": destination,
+        "guidepost_req": guidepost_req_jd,
+        'history': []
+    }
+    history = ctx[
+        'history'
+    ]
+    vs = get_candidates_by_gps(g, origin)
+    for i in range(10):
+        v = guidepost_recommend(ctx, vs)
+        if not v: break
+        history.append(v)
+        
+        vs = get_candidates_by_vid(g, v.index)
+        if need_report:
+            report_onestep(ctx, history, need_desc=need_desc)
+    rsp = dict(
+        indices= [v.index for v in history]
+    )
+    return rsp
+
+def get_d_by_o(origin):
+    destination = (origin[0], origin[1]+0.08)
+    return destination
+
+def recommend_next_vid(g, vs):
+    """main function for guidepost!!
+    """
+    if len(vs) == 0:
+        return None
+    else:
+        i = random.randint(0, len(vs)-1)
+        v = vs[i]
+        vid = v.index
+        return v
+    
+
+## 线路推荐法
+
+def get_prepare_df():
+    df = pd.read_csv(data_path_("history/geo_stop_all_country.csv")) \
+        [['lineid', 'sequenceno', 'lng', 'lat', 'stopname', 'linename']] \
+        .assign(lineid=lambda xdf: xdf.lineid.astype('str').apply(lambda x: x[:-4]).astype('int')) \
+        .groupby(["lineid", 'sequenceno'], as_index=False).first()
+    return df
+
+def get_line_graph(df, location, neighbor_km=0.8, km=10, line_seq_max_count=32):
+    def make_line_location_feature(arr):
+        arr = np.array(arr)
+        extra_shape = (line_seq_max_count - arr.shape[0], arr.shape[1])
+        assert extra_shape[0]>=0
+        if extra_shape[0]>0:
+            arr = np.concatenate([
+                arr,
+                np.broadcast_to(arr[-1, ...], extra_shape)
+            ], axis=0)
+        return arr
+    df = df \
+        .assign(seq_mod=lambda xdf: xdf.sequenceno % line_seq_max_count) \
+        .assign(seq_div=lambda xdf: xdf.sequenceno // line_seq_max_count) \
+        .assign(lineid=lambda xdf: xdf.lineid.astype('str')+'_'+xdf.seq_div.astype('str')) \
+        .assign(seq=lambda xdf: xdf.seq_mod) \
+        [['lineid', 'seq', 'lng', 'lat', 'stopname', 'linename']]
+    #TODO get map of lineid-seq -> linename, stopname, lng, lat
+    arr = df[['lng', 'lat']].to_numpy()
+    kdtree = KDTree(arr)
+    idxs = kdtree.query_ball_point(location, km/110)
+    lineids = df.loc[idxs].lineid.unique()
+    df = df.set_index("lineid").loc[lineids].reset_index()
+    df_line_vertex = df \
+        .assign(gps=lambda xdf: xdf.apply(axis=1, func=lambda row: [row.lng, row.lat])) \
+        .groupby("lineid") \
+        .gps.apply(list) \
+        .apply(make_line_location_feature) \
+        .rename("feature") \
+        .to_frame() \
+        .rename_axis("lineid") \
+        .reset_index()
+    arr = df[['lng', 'lat']].to_numpy()
+    kdtree = KDTree(arr)
+    df_line_edge = pd.Series(kdtree.query_ball_point(arr, neighbor_km/110)) \
+        .explode() \
+        .rename_axis("src").rename("tgt") \
+        .to_frame().reset_index() \
+        .astype(dict(src='int', tgt='int')) \
+        .assign_by("src", src_lineid=df_line_vertex.lineid) \
+        .assign_by("tgt", tgt_lineid=df_line_vertex.lineid) \
+        .groupby(['src_lineid', 'tgt_lineid'], as_index=False) \
+        .size().rename(dict(size="transfer_count"), axis=1) \
+        .query("src_lineid!=tgt_lineid")
+    tgt_lineids = list(set(df_line_edge.tgt_lineid.tolist()) & set(df_line_vertex.lineid.tolist()))
+    df_line_edge = df_line_edge \
+        .set_index("tgt_lineid") \
+        .loc[tgt_lineids] \
+        .reset_index() \
+        [['src_lineid', 'tgt_lineid', 'transfer_count']]
+    sr_linename = df.groupby("lineid").linename.first()
+    df_line_vertex = df_line_vertex \
+        .assign_by('lineid', linename=sr_linename)
+    g = ig.Graph.DataFrame(df_line_edge, directed=True, vertices=df_line_vertex)
+    
+    # get_location_feature
+
+    df_gps2lineids = df.groupby(['lng', 'lat']).lineid.unique() \
+    .rename('lineids').to_frame() \
+    .reset_index()
+    stop_gps_arr = df_gps2lineids[['lng', 'lat']].to_numpy()
+    stop_kdtree = KDTree(stop_gps_arr)
+    m_idx2lineid = dict(df_gps2lineids['lineids'].reset_index().to_numpy().tolist())
+
+    sr_lineid2vid = g \
+        .get_vertex_dataframe() \
+        ['name'] \
+        .rename_axis("vid") \
+        .rename("lineid") \
+        .reset_index() \
+        .set_index("lineid")['vid']
+    m_lineid2vid = dict(sr_lineid2vid.reset_index().to_numpy().tolist())
+
+    def get_location_feature(location, n=5):
+        import functools
+        rd_list, ri_list = stop_kdtree.query(location, n)
+        rs = functools.reduce(lambda x, y: x+y, [
+            list(zip(m_idx2lineid[ri].tolist(), [rd]*m_idx2lineid[ri].shape[0])) for ri, rd in zip(ri_list, rd_list)
+        ], [])
+        rs = [
+            (m_lineid2vid[_[0]], _[1]) for _ in rs
+        ]
+        
+        features = g.vs[[_[0] for _ in rs]]['feature']
+        
+        feature = np.concatenate(features, axis=1)
+        k = 32
+        feature = feature[..., :k]
+        extra_shape = (feature.shape[0], k-feature.shape[1])
+        if extra_shape[1]>0:
+            extra_feature = np.broadcast_to(feature[..., -1:], extra_shape)
+            feature = np.concatenate([
+                feature, extra_feature
+            ], axis=1)
+        return feature
+    _df = df \
+        .assign(key=lambda xdf: xdf.lineid+'_'+xdf.seq.astype('str')) \
+        .assign(val=lambda xdf: xdf[['linename', 'stopname', 'lng', 'lat']].apply(axis=1, func=dict)) \
+        [['key', 'val']]
+    m_desc = dict(_df.to_numpy().tolist())
+    rsp = {
+        'g': g,
+        'get_location_feature': get_location_feature,
+        "m_desc": m_desc
+    }
+    return rsp
+
+def get_getoff_seq(arr1, arr2):
+    """
+    TODO: judge arr1 and arr2 are oppo line
+    """
+    kdtree = KDTree(arr1)
+    rd_list, ri_list = kdtree.query(arr2)
+    i = np.argmin(rd_list)
+    return ri_list[i]
