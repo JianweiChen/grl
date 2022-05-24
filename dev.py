@@ -1,3 +1,4 @@
+# author: chenjianwei
 ## Write only functions, not classes if necessary
 # my: 2731289611338
 # def ej():
@@ -208,8 +209,6 @@ def _assign_gps(df):
     df = df.assign_join_col(gps=('lng', 'lat'))
     return df
 
-#### now, start to compile busgraph igraph
-
 def _np_distance_args_preprocess(*args):
     assert len(args) in (1, 4)
     if args.__len__() == 4:
@@ -259,9 +258,6 @@ def load_desc_df(path=data_path_("desc.csv")):
         .assign(linename=lambda xdf: xdf.desc.str.split('_').apply(lambda x: x[0])) \
         .assign(coordinate=lambda xdf: xdf.lng.astype('str')+','+xdf.lat.astype('str'))
     return df
-
-
-
 
 class Vizmap(traitlets.HasTraits):
     """For taking latitude and longitude points in jupyter notebook
@@ -332,14 +328,15 @@ def check_guidepost_context_input_df(df):
     """
     return True
 
-### line recommend
    
 """
-最简单版本的特征构成 未来应该做成rnn可变长的
+A machine learning solution for generating demand for bus transfer routes; as a whole, it is a recommendation system problem that recommends routes based on the current origin and destination conditions;
+On the basis of known bus routes, determine the stops of getting on and off the bus according to some rules, please note that route recommendation solves almost 90% of the functions in this scenario;
+
+TODO: The simplest version of the feature composition should be made into rnn variable length in the future
 feature shape:
     k1 * (2 + k_history + k_lvp + k_candidate + 2)
-
-context
+context...
 """
 
 def get_default_guidepost_config():
@@ -355,6 +352,9 @@ def get_default_guidepost_config():
     return config
 
 def get_location_ls(context, location):
+    """A location is represented by several nearby lines. 
+    The order of these lines should be insensitive to the model.
+    """
     _, ri_list = context['location_kdtree'].query(location, 10)
     lineids = [context['m_locationid_to_lineid'].get(_) for _ in ri_list]
     vertex_ids = [context['m_lineid_to_vertexid'].get(_) for _ in lineids]
@@ -366,9 +366,16 @@ def get_location_ls(context, location):
     return new_vertex_ids
 
 def extract_item_feature(ctx, lid):
+    """The actual serving method is the inner product between the output vector of the position subgraph and the output vector of the item subgraph, that is, the form of double towers.
+    This is beneficial for serving in scenarios with an indeterminate number of candidate lines
+    """
     g = context['g']
     return g.vs[lid]['line_feature']
+
 def make_extract_situation_feature_demo_req(ctx):
+    """Given a guidepost_context, use its center position as the starting point, 10 kilometers northward as the ending point to imitate a user behavior, and use a random line near the starting point as the first item of history
+    Just for testing function `extract_situation_feature`
+    """
     config = ctx['config']
     center = config['center']
     ols = get_location_ls(ctx, origin)
@@ -388,6 +395,13 @@ def make_extract_situation_feature_demo_req(ctx):
     return req
 
 def extract_situation_feature(context, req):
+    """
+    feat history refers to the line selected in history; 
+    feat lvp is the shortest path of the line nodes obtained by the Cartesian product of the start and end points; 
+    feat_candidate refers to the line that can be selected in the current situation; 
+    any situation that does not meet the length will be completed with 0 to obtain A regularized shape; 
+    in particular, the lvp feature uses a k1*2 all-zero tensor as a separator between every two shortest paths of line nodes
+    """
 
     origin = req['origin']
     destination = req['destination']
@@ -456,8 +470,7 @@ def build_guidepost_context(df, config):
     center = config['center']
     r_km = config.get("r_km", 10)
     transfer_km = config.get("transfer_km", 0.8)
-    
-    
+
     if 'sequenceno' in df.columns and 'seq' not in df.columns:
         df = df.rename({'sequenceno': 'seq'}, axis=1)
     
@@ -525,8 +538,6 @@ def build_guidepost_context(df, config):
     )
     return ctx
 
-
-
 def guidepost_query(ctx, req):
     #*****************临时记录**************
     candidate_ls = context['g'].neighbors(1, mode='out')
@@ -588,8 +599,8 @@ def generate_instances(ctx, req):
     return rsp
 
 def completion_arr(arr, shape):
-    """将数组变为指定形状
-    与reshape有本质区别 采用的是裁剪和0补全的方法
+    """The array becomes the specified shape
+    Essentially different from reshape, it adopts the method of cropping and 0-completion
     """
     if shape[0] >= 0:
         extra_row_shape = (shape[0]-arr.shape[0], arr.shape[1])
@@ -627,7 +638,7 @@ def draw_all_neighbor_lines(context, vertex_id):
     draw_lines(context, *context['g'].neighbors(vertex_id, mode='out'))
 
 def split_situation_feature(ctx, feat):
-    """将situation_feature按照列分割为所设计的几类 history/lvp/candidate
+    """Divide the situation_feature into several designed types history/lvp/candidate according to the column
     """
     config = ctx.get("config")
     k_history = config.get("k_history")
@@ -644,7 +655,7 @@ def split_situation_feature(ctx, feat):
     return feat_list
 
 def draw_guidepost_feat(feat):
-    """将guidepost的线路类特征画出来
+    """Draw the line features of guidepost
     >>> feature_history, feature_lvp, feature_candidate = split_situation_feature(context, feat)
     >>> draw_guidepost_feat(feat_candidate)
     """
@@ -661,6 +672,7 @@ def draw_guidepost_feat(feat):
         if xs and ys:
             draw_arg_list.extend([xs, ys])
     plt.plot(*draw_arg_list)
+
 def feature_history_to_transit_routeplan(feature_history):
     """feature_history是指 dst-l3-l2-l1-org 这样顺序的 k_history * k1维度的二维数组
     不足的部分补零
