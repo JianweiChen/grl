@@ -838,3 +838,33 @@ class IdManager(object):
     def dump(self, path):
         dill.dump(self, pathlib.Path(path).open("wb"))
 
+
+
+def connect_graph_in_circle_mode(g):
+    """用于生成连通图
+    """
+    leaders = [_[0] for _ in g.components()]
+    if leaders.__len__() == 1:
+        return
+    leader_edges = list(zip(leaders, [*leaders[1:], leaders[0]]))
+    for leader_edge in leader_edges:
+        g.add_edge(*leader_edge)
+
+def fill_empty_gc_for_gate_sid(row):
+    gc = row.gc
+    gate = row.gate
+    if eval(gc).__len__() == 0 and gate>0:
+        gc = str([row.lng, row.lat])
+    return gc
+
+def load_desc_df(path=data_path_("desc.csv")):
+    """
+    >>> df_desc = load_desc_df()
+    >>> df_desc.query("stopname.str.contains('知春路')")
+    """
+    df = pd.read_csv(path).set_index(['lid', 'seq']) \
+        [['desc', 'stopid', 'lineid', 'lng', 'lat']] \
+        .assign(stopname=lambda xdf: xdf.desc.str.split('_').apply(lambda x: x[1])) \
+        .assign(linename=lambda xdf: xdf.desc.str.split('_').apply(lambda x: x[0])) \
+        .assign(coordinate=lambda xdf: xdf.lng.astype('str')+','+xdf.lat.astype('str'))
+    return df
