@@ -327,6 +327,7 @@ class Gpctx(object):
         print("Gpctx构建完成")
     
     def tensor_map_to_gpctx(self, tensor_map):
+        locals().update(tensor_map)
         _dfe = pd.concat([
             pd.DataFrame(x7, columns=['src', 'tgt']),
             pd.DataFrame(x8, columns=['mht', 'weight'])
